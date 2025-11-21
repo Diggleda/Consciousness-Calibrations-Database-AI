@@ -1,0 +1,117 @@
+name: Build miniforge
+on: [ push, pull_request ]
+
+jobs:
+  build:
+    name: Miniforge3-${{ matrix.OS_NAME }}-${{ matrix.ARCH }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            ARCH: x86_64
+            TARGET_PLATFORM: win-64
+            OS_NAME: "Windows"
+
+          - os: macos-latest
+            ARCH: arm64
+            TARGET_PLATFORM: osx-arm64
+            OS_NAME: "MacOSX"
+
+          - os: macos-latest
+            ARCH: x86_64
+            TARGET_PLATFORM: osx-64
+            OS_NAME: "MacOSX"
+
+          - os: ubuntu-latest
+            ARCH: aarch64
+            TARGET_PLATFORM: linux-aarch64
+            DOCKER_ARCH: arm64/v8
+            DOCKERIMAGE: condaforge/linux-anvil-aarch64
+            OS_NAME: "Linux"
+            # Reduce the test matrix because the builds timeouts on emulated architectures
+            # The time consuming operation is an attempt a full solve of conda/mamba/boa
+            # for as a compatibility
+            # xref https://github.com/conda-forge/miniforge/pull/361
+            TEST_IMAGE_NAMES: "ubuntu:24.04"
+
+          - os: ubuntu-latest
+            ARCH: x86_64
+            TARGET_PLATFORM: linux-64
+            DOCKER_ARCH: amd64
+            DOCKERIMAGE: condaforge/linux-anvil-cos7-x86_64
+            OS_NAME: "Linux"
+
+          - os: ubuntu-latest
+            ARCH: ppc64le
+            TARGET_PLATFORM: linux-ppc64le
+            DOCKER_ARCH: ppc64le
+            DOCKERIMAGE: condaforge/linux-anvil-ppc64le
+            OS_NAME: "Linux"
+            # Reduce the test matrix because the builds timeouts on emulated architectures
+            # The time consuming operation is an attempt a full solve of conda/mamba/boa
+            # for as a compatibility
+            # xref https://github.com/conda-forge/miniforge/pull/361
+            TEST_IMAGE_NAMES: "ubuntu:24.04"
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+
+      - uses: conda-incubator/setup-miniconda@835234971496cad1653abb28a638a281cf32541f # v3.2.0
+        with:
+          miniforge-version: "latest"
+          use-mamba: true
+        if: ${{ ! contains(matrix.OS_NAME, 'Linux') }}
+
+      - name: Build and test miniforge
+        env:
+          ARCH: ${{ matrix.ARCH }}
+          OS_NAME: ${{ matrix.OS_NAME }}
+          DOCKERIMAGE: ${{ matrix.DOCKERIMAGE }}
+          DOCKER_ARCH: ${{ matrix.DOCKER_ARCH }}
+          TARGET_PLATFORM: ${{ matrix.TARGET_PLATFORM }}
+          TEST_IMAGE_NAMES: ${{ matrix.TEST_IMAGE_NAMES }}
+        run: |
+          if [[ "$GITHUB_REF" == refs/tags/* ]]; then
+            export MINIFORGE_VERSION=${GITHUB_REF##*/};
+          fi
+          if [[ "$OS_NAME" == "Linux" ]]; then
+            export EXT=sh
+            bash build_miniforge.sh;
+          fi
+          if [[ "$OS_NAME" == "MacOSX" ]]; then
+            export EXT=sh
+            bash build_miniforge_osx.sh;
+          fi
+          if [[ "$OS_NAME" == "Windows" ]]; then
+            export EXT=exe
+            echo "WINDIR:$WINDIR"
+            source "${CONDA}"/Scripts/activate;
+            source build_miniforge_win.sh;
+          fi
+          # Copy for latest release
+          cp build/Miniforge3-*-$OS_NAME-$ARCH.$EXT build/Miniforge3-$OS_NAME-$ARCH.$EXT
+          if [[ "$OS_NAME" == "MacOSX" ]]; then
+            cp build/Miniforge3-*-$OS_NAME-$ARCH.$EXT build/Miniforge3-Darwin-$ARCH.$EXT
+          fi
+          ls -alh build
+        shell: bash
+
+      - name: Upload miniforge to Github artifact
+        if: always()
+        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5.0.0
+        with:
+          path: build/Miniforge3-${{ matrix.OS_NAME }}-${{ matrix.ARCH }}*
+          name: Miniforge3-${{ matrix.OS_NAME }}-${{ matrix.ARCH }}
+
+      - name: Upload miniforge to release
+        uses: svenstaro/upload-release-action@81c65b7cd4de9b2570615ce3aad67a41de5b1a13 # v2.11.2
+        with:
+          repo_token: ${{ secrets.GITHUB_TOKEN }}
+          file: build/M*forge*
+          tag: ${{ github.ref }}
+          overwrite: true
+          file_glob: true
+        if: startsWith(github.ref, 'refs/tags/')
