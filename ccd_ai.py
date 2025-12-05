@@ -1104,6 +1104,11 @@ database: Database = {
         "string": "karmic merit",
         "calibration": 470,
         "type": "ADAP"
+    },
+    "173": {
+        "string": "matra: I love myself",
+        "calibration": 530,
+        "type": "ADAP"
     }
 }
 
