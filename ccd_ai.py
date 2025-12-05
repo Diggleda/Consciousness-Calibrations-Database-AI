@@ -1109,6 +1109,11 @@ database: Database = {
         "string": "matra: I love myself",
         "calibration": 530,
         "type": "ADAP"
+    },
+    "174": {
+        "string": "God created man in his own image...male and female he created them",
+        "calibration": 490,
+        "type": "ADAP"
     }
 }
 
