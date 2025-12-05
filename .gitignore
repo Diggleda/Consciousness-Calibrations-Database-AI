@@ -1,1 +1,6 @@
 .env
+__pycache__/
+*.py[cod]
+.DS_Store
+.venv*/
+OpenAI_Key.rtf

@@ -25,6 +25,7 @@ import re
 import sys
 import urllib.error
 import urllib.request
+from collections import defaultdict
 from difflib import SequenceMatcher
 from statistics import mean
 from typing import Callable, Dict, Iterable, List, Sequence, Set, Tuple
@@ -78,6 +79,11 @@ MatchDict = Dict[str, Dict[str, object]]
 
 
 SIMILARITY_THRESHOLD = 0.85
+PROMPT_APPROX_CHARS_PER_TOKEN = 4
+MAX_STATEMENT_PROMPT_TOKENS = 256
+MAX_SUGGESTION_PROMPT_TOKENS = 196
+MAX_CONTEXT_STATEMENT_TOKENS = 160
+MAX_CONTEXT_ENTRY_TOKENS = 120
 STOPWORDS = {
     "a",
     "an",
@@ -211,6 +217,20 @@ NEGATION_TOKENS = {
     "low",
     "lower"
 }
+
+
+def truncate_for_prompt(text: str, max_tokens: int) -> str:
+    """Rudimentary token-aware truncation to keep prompts within model limits."""
+    if not text or max_tokens <= 0:
+        return ""
+    max_chars = max_tokens * PROMPT_APPROX_CHARS_PER_TOKEN
+    if len(text) <= max_chars:
+        return text
+    truncated = text[:max_chars]
+    last_space = truncated.rfind(" ")
+    if last_space > int(max_chars * 0.6):
+        truncated = truncated[:last_space]
+    return truncated.rstrip() + "..."
 
 
 database: Database = {
@@ -1009,6 +1029,81 @@ database: Database = {
         "string": "the whole universe loves you",
         "calibration": 599.99,
         "type": "ADAP"
+    },
+    "158": {
+        "string": "The degree of one’s faith in a practice or pathway empowers it",
+        "calibration": 510,
+        "type": "ADAP"
+    },
+    "159": {
+        "string": "I love you",
+        "calibration": 490,
+        "type": "ADAP"
+    },
+    "160": {
+        "string": "I bless you",
+        "calibration": 505,
+        "type": "ADAP"
+    },
+    "161": {
+        "string": "wear the world like a loose garment",
+        "calibration": 490,
+        "type": "ADAP"
+    },
+    "162": {
+        "string": "aluminum recycling",
+        "calibration": 210,
+        "type": "ADAP"
+    },
+    "163": {
+        "string": "plastic bottle recyling",
+        "calibration": 195,
+        "type": "ADAP"
+    },
+    "164": {
+        "string": "paper/cardboard recycling",
+        "calibration": 190,
+        "type": "ADAP"
+    },
+    "165": {
+        "string": "glass bottle recycling",
+        "calibration": 190,
+        "type": "ADAP"
+    },
+    "166": {
+        "string": "happiness",
+        "calibration": 385,
+        "type": "ADAP"
+    },
+    "167": {
+        "string": "seeing the world through rose-tinted glasses",
+        "calibration": 185,
+        "type": "ADAP"
+    },
+    "168": {
+        "string": "seeing only the best in others or oneself",
+        "calibration": 190,
+        "type": "ADAP"
+    },
+    "169": {
+        "string": "no mercy for the small-self",
+        "calibration": 30,
+        "type": "ADAP"
+    },
+    "170": {
+        "string": "a human with bad karma can reincarnate as an animal",
+        "calibration": 100,
+        "type": "ADAP"
+    },
+    "171": {
+        "string": "ignoring someone so they will like you",
+        "calibration": 150,
+        "type": "ADAP"
+    },
+    "172": {
+        "string": "karmic merit",
+        "calibration": 470,
+        "type": "ADAP"
     }
 }
 
@@ -1173,6 +1268,81 @@ ADAP_MOC_NEGATIVE_HINT_PHRASES = {
     "discriminate",
 }
 
+ADAP_MOC_TOKEN_HINTS: List[Tuple[int, Set[str]]] = [
+    (
+        160,
+        {
+            "want",
+            "wants",
+            "wanting",
+            "wanted",
+            "desire",
+            "desires",
+            "desiring",
+            "needy",
+            "need",
+            "needs",
+            "yearn",
+            "yearning",
+            "crave",
+            "craving",
+        },
+    ),
+    (
+        125,
+        {
+            "fear",
+            "fears",
+            "afraid",
+            "scared",
+            "worried",
+            "worry",
+            "anxious",
+            "anxiety",
+            "panic",
+            "panicking",
+            "terrified",
+        },
+    ),
+    (
+        75,
+        {
+            "apathy",
+            "hopeless",
+            "hopelessness",
+            "numb",
+            "numbness",
+            "limbo",
+            "stuck",
+        },
+    ),
+]
+
+
+def _detect_adap_hint_loc(text: str) -> int | None:
+    normalized = normalize_term(text)
+    tokens = tokenize_for_overlap(text)
+    for phrase in ADAP_MOC_NEGATIVE_HINT_PHRASES:
+        if phrase in normalized:
+            return 150
+    for loc, keywords in ADAP_MOC_TOKEN_HINTS:
+        if tokens & keywords:
+            return loc
+    return None
+
+
+def _closest_adap_key_to_loc(target_loc: int) -> str:
+    """Return the ADAP map key whose calibration is closest to the target."""
+    best_key = ADAP_MOC_ORDERED_KEYS[-1]
+    best_diff = float("inf")
+    for key in ADAP_MOC_ORDERED_KEYS:
+        diff = abs(int(ADAP_MAP_OF_CONSCIOUSNESS[key]["calibration"]) - target_loc)
+        if diff < best_diff or (diff == best_diff and ADAP_MAP_OF_CONSCIOUSNESS[key]["calibration"] < ADAP_MAP_OF_CONSCIOUSNESS[best_key]["calibration"]):
+            best_diff = diff
+            best_key = key
+    return best_key
+
+
 DATABASE_REFERENCES = "\n".join(
     f"{index + 1}. {entry['string']} (calibration {entry['calibration']})"
     for index, entry in enumerate(database.values())
@@ -1185,6 +1355,69 @@ _GPT_READY_EMITTED = False
 _OPENAI_WARNING_EMITTED = False
 _OPENAI_READY_EMITTED = False
 OPENAI_DISABLED_REASON = "" if OPENAI_API_KEY else "set OPENAI_API_KEY to enable OpenAI keywords"
+
+
+def _openai_model_uses_chat(model_name: str) -> bool:
+    """Heuristic to determine whether to call the chat or legacy completions endpoint."""
+    normalized = model_name.strip().lower()
+    if not normalized:
+        return False
+    if normalized.startswith("text-") or normalized.startswith("code-"):
+        return False
+    if "instruct" in normalized and normalized.startswith("gpt-3.5"):
+        return False
+    # Assume everything else (e.g., gpt-3.5-turbo, gpt-4 variants, gpt-5) uses chat completions.
+    return True
+
+
+def _openai_model_uses_responses(model_name: str) -> bool:
+    """Return True if the model should be queried via the Responses API."""
+    normalized = model_name.strip().lower()
+    if not normalized:
+        return False
+    response_prefixes = (
+        "gpt-4.1",
+        "gpt-5",
+        "o4",
+    )
+    response_contains = ("-mini", "responses")
+    if any(normalized.startswith(prefix) for prefix in response_prefixes):
+        return True
+    if any(token in normalized for token in response_contains):
+        return True
+    return False
+
+
+def _heuristic_context_related(statement: str, entry_text: str) -> bool:
+    statement_tokens = tokenize_for_overlap(statement)
+    entry_tokens = entry_tokens_for(entry_text)
+    if not statement_tokens or not entry_tokens:
+        return False
+    polarity_match = has_negation(statement) == has_negation(entry_text)
+    if not polarity_match:
+        return False
+    statement_token_count = len(statement_tokens)
+    entry_token_count = len(entry_tokens)
+    if statement_token_count <= 1 or entry_token_count <= 1:
+        min_overlap = 1
+    elif min(statement_token_count, entry_token_count) <= 2:
+        min_overlap = 1
+    else:
+        min_overlap = 2
+    overlap = len(statement_tokens & entry_tokens)
+    if overlap < min_overlap:
+        if overlap == 1:
+            ratio = SequenceMatcher(None, normalize_term(statement), normalize_term(entry_text)).ratio()
+            if ratio >= 0.6:
+                return True
+        return False
+    if overlap < 2:
+        if statement_token_count <= 2 or entry_token_count <= 2:
+            return True
+        if max(statement_token_count, entry_token_count) >= 4:
+            ratio = SequenceMatcher(None, normalize_term(statement), normalize_term(entry_text)).ratio()
+            return ratio >= 0.65
+    return True
 
 
 def warn_gpt_disabled(extra_reason: str | None = None) -> None:
@@ -1269,6 +1502,23 @@ DATABASE_ENTRY_TOKENS = {
 }
 
 
+def _candidate_keys_for_tokens(term_tokens: Set[str], data: Database) -> Set[str]:
+    if not term_tokens:
+        return set(data.keys())
+    index = _token_index_for_data(data)
+    candidates: Set[str] = set()
+    for token in term_tokens:
+        keys = index.get(token)
+        if not keys:
+            continue
+        for key in keys:
+            if key in data:
+                candidates.add(key)
+    if not candidates:
+        return set(data.keys())
+    return candidates
+
+
 def dedupe_preserve(items: Iterable[str]) -> List[str]:
     """Remove duplicates while preserving the original ordering."""
     seen: Set[str] = set()
@@ -1289,6 +1539,30 @@ def entry_tokens_for(name: str) -> Set[str]:
         tokens = tokenize_for_overlap(normalized)
         DATABASE_ENTRY_TOKENS[normalized] = tokens
     return tokens
+
+
+def _build_token_index(data: Database) -> Dict[str, Set[str]]:
+    index: Dict[str, Set[str]] = defaultdict(set)
+    for key, entry in data.items():
+        tokens = entry_tokens_for(entry["string"])
+        for token in tokens:
+            if token:
+                index[token].add(key)
+    return index
+
+
+_DATASET_TOKEN_INDEX_CACHE: Dict[int, Dict[str, Set[str]]] = {}
+DATABASE_TOKEN_INDEX = _build_token_index(database)
+_DATASET_TOKEN_INDEX_CACHE[id(database)] = DATABASE_TOKEN_INDEX
+
+
+def _token_index_for_data(data: Database) -> Dict[str, Set[str]]:
+    cached = _DATASET_TOKEN_INDEX_CACHE.get(id(data))
+    if cached is not None:
+        return cached
+    index = _build_token_index(data)
+    _DATASET_TOKEN_INDEX_CACHE[id(data)] = index
+    return index
 
 
 def is_stopword(term: str) -> bool:
@@ -1426,7 +1700,14 @@ def generate_with_gpt2(prompt: str, max_new_tokens: int = 64) -> str | None:
         return None
     assert GPT2_MODEL is not None and GPT2_TOKENIZER is not None  # For type-checkers.
     try:
-        inputs = GPT2_TOKENIZER(prompt, return_tensors="pt")
+        max_context = getattr(GPT2_MODEL.config, "n_positions", 1024) or 1024
+        max_prompt_tokens = max(1, max_context - max_new_tokens)
+        inputs = GPT2_TOKENIZER(
+            prompt,
+            return_tensors="pt",
+            truncation=True,
+            max_length=max_prompt_tokens,
+        )
         with torch.no_grad():
             output_ids = GPT2_MODEL.generate(
                 **inputs,
@@ -1446,19 +1727,45 @@ def generate_with_gpt2(prompt: str, max_new_tokens: int = 64) -> str | None:
         return None
 
 
+def language_model_completion(prompt: str, max_new_tokens: int = 64) -> str | None:
+    """Call OpenAI first, then fall back to GPT-2, returning the generated text."""
+    text = generate_with_openai(prompt, max_new_tokens=max_new_tokens)
+    if text:
+        return text
+    return generate_with_gpt2(prompt, max_new_tokens=max_new_tokens)
+
+
 def generate_with_openai(prompt: str, max_new_tokens: int = 64) -> str | None:
     """Use OpenAI's completions API to generate text, returning None if unavailable."""
     if not OPENAI_API_KEY:
         warn_openai_disabled()
         return None
-    url = f"{OPENAI_API_BASE.rstrip('/')}/completions"
-    payload = {
-        "model": OPENAI_MODEL,
-        "prompt": prompt,
-        "max_tokens": max_new_tokens,
-        "temperature": 0.25,
-        "n": 1,
-    }
+    use_responses_endpoint = _openai_model_uses_responses(OPENAI_MODEL)
+    use_chat_endpoint = _openai_model_uses_chat(OPENAI_MODEL) and not use_responses_endpoint
+    if use_responses_endpoint:
+        url = f"{OPENAI_API_BASE.rstrip('/')}/responses"
+        payload = {
+            "model": OPENAI_MODEL,
+            "input": prompt,
+        }
+    elif use_chat_endpoint:
+        url = f"{OPENAI_API_BASE.rstrip('/')}/chat/completions"
+        payload = {
+            "model": OPENAI_MODEL,
+            "messages": [{"role": "user", "content": prompt}],
+            "max_tokens": max_new_tokens,
+            "temperature": 0.25,
+            "n": 1,
+        }
+    else:
+        url = f"{OPENAI_API_BASE.rstrip('/')}/completions"
+        payload = {
+            "model": OPENAI_MODEL,
+            "prompt": prompt,
+            "max_tokens": max_new_tokens,
+            "temperature": 0.25,
+            "n": 1,
+        }
     data = json.dumps(payload).encode("utf-8")
     req = urllib.request.Request(
         url,
@@ -1480,11 +1787,43 @@ def generate_with_openai(prompt: str, max_new_tokens: int = 64) -> str | None:
     except Exception as exc:
         warn_openai_disabled(f"error contacting OpenAI API ({exc.__class__.__name__})")
         return None
-    choices = response_payload.get("choices")
-    if not choices:
-        warn_openai_disabled("OpenAI API returned no choices")
-        return None
-    text = choices[0].get("text", "")
+    text = ""
+    if use_responses_endpoint:
+        output_text = response_payload.get("output_text")
+        if isinstance(output_text, list) and output_text:
+            text = "\n".join(str(part) for part in output_text if part)
+        if not text:
+            output = response_payload.get("output")
+            if isinstance(output, list):
+                for block in output:
+                    if not isinstance(block, dict):
+                        continue
+                    if block.get("type") != "message":
+                        continue
+                    content = block.get("content", [])
+                    if isinstance(content, list):
+                        for chunk in content:
+                            if not isinstance(chunk, dict):
+                                continue
+                            chunk_type = chunk.get("type")
+                            if chunk_type not in {"text", "output_text"}:
+                                continue
+                            text = chunk.get("text", "") or ""
+                            if text:
+                                break
+                    if text:
+                        break
+    else:
+        choices = response_payload.get("choices")
+        if not choices:
+            warn_openai_disabled("OpenAI API returned no choices")
+            return None
+        if use_chat_endpoint:
+            message = choices[0].get("message", {})
+            if isinstance(message, dict):
+                text = message.get("content", "") or ""
+        else:
+            text = choices[0].get("text", "")
     if text:
         announce_openai_ready()
     return text.strip()
@@ -1523,6 +1862,7 @@ def get_keywords_from_prompt(
 
 def generate_secondary_keywords(statement: str) -> List[str]:
     """Produce up to 10 descriptive keywords for the user statement."""
+    statement_for_prompt = truncate_for_prompt(statement, MAX_STATEMENT_PROMPT_TOKENS)
     prompt = (
         "Generate exactly 10 concise keywords that someone would naturally associate with "
         "the statement below. Favor synonyms, hypernyms, physical attributes, contexts, "
@@ -1531,7 +1871,7 @@ def generate_secondary_keywords(statement: str) -> List[str]:
         "closely related nouns (e.g., synonyms or category names) that may match entries. "
         "Each keyword must be 1-3 alphabetic words, comma-separated, with no instructions "
         "or filler language.\n"
-        f"Statement: \"{statement}\"\n"
+        f"Statement: \"{statement_for_prompt}\"\n"
         "Keywords:"
     )
     return get_keywords_from_prompt(
@@ -1546,7 +1886,7 @@ def generate_tertiary_keywords(unmatched_terms: Sequence[str]) -> List[str]:
     """Expand unmatched secondary keywords into tertiary descriptors."""
     if not unmatched_terms:
         return []
-    joined_terms = ", ".join(unmatched_terms)
+    joined_terms = truncate_for_prompt(", ".join(unmatched_terms), MAX_SUGGESTION_PROMPT_TOKENS)
     prompt = (
         "The following keywords returned no database matches: "
         f"{joined_terms}. "
@@ -1610,6 +1950,8 @@ def search_database_with_terms(
     terms: Iterable[str],
     data: Database,
     statement_context: str | None = None,
+    min_term_token_overlap_ratio: float = 0.0,
+    min_term_tokens: int = 0,
 ) -> Tuple[MatchDict, Set[str]]:
     """Search the database for any entry containing the provided terms."""
     matches: MatchDict = {}
@@ -1619,14 +1961,35 @@ def search_database_with_terms(
         if not normalized_term:
             continue
         term_tokens = tokenize_for_overlap(normalized_term)
+        if not term_tokens:
+            continue
+        if min_term_tokens and len(term_tokens) < min_term_tokens:
+            continue
+        total_term_token_count = len(term_tokens)
+        effective_min_ratio = min_term_token_overlap_ratio
+        if effective_min_ratio > 0 and total_term_token_count <= 3:
+            effective_min_ratio = 0.0
+        candidate_keys = _candidate_keys_for_tokens(term_tokens, data)
         term_word_count = len(normalized_term.split())
-        for key, entry in data.items():
+        for key in candidate_keys:
+            entry = data[key]
             db_string = normalize_term(str(entry.get("string", "")))
             entry_tokens = entry_tokens_for(entry["string"])
             min_overlap = 1
             entry_word_count = len(db_string.split())
             if term_word_count > 1 and entry_word_count > 1:
                 min_overlap = 2
+                if min(len(term_tokens), len(entry_tokens)) <= 2:
+                    min_overlap = 1
+            overlap = len(term_tokens & entry_tokens)
+            if overlap < min_overlap:
+                continue
+            if (
+                effective_min_ratio > 0
+                and total_term_token_count > 0
+                and overlap / total_term_token_count < effective_min_ratio
+            ):
+                continue
             if is_close_match(normalized_term, db_string, entry_tokens, min_overlap):
                 if statement_context and not contexts_align(statement_context, entry["string"]):
                     continue
@@ -1656,17 +2019,25 @@ def search_database_near_exact(term: str, data: Database, similarity_threshold: 
     term_tokens = tokenize_for_overlap(normalized_term)
     if not term_tokens:
         return {}
+    candidate_keys = _candidate_keys_for_tokens(term_tokens, data)
     matches: MatchDict = {}
-    for key, entry in data.items():
+    for key in candidate_keys:
+        entry = data[key]
         db_string = normalize_term(str(entry.get("string", "")))
         if not db_string:
             continue
+        effective_threshold = similarity_threshold
+        if len(normalized_term.split()) <= 4:
+            effective_threshold = max(0.8, similarity_threshold - 0.1)
         ratio = SequenceMatcher(None, normalized_term, db_string).ratio()
-        if ratio < similarity_threshold:
+        if ratio < effective_threshold:
             continue
         entry_tokens = entry_tokens_for(entry["string"])
         min_overlap = min(len(term_tokens), len(entry_tokens))
         overlap = len(term_tokens & entry_tokens)
+        if min_overlap <= 2 and overlap >= 1:
+            matches[key] = entry
+            continue
         if overlap >= max(1, min_overlap):
             matches[key] = entry
     return matches
@@ -1714,15 +2085,32 @@ def search_adap_map(
     return matches
 
 
+def _filter_statement_similarity_matches(statement: str, matches: MatchDict) -> MatchDict:
+    """Tighten the statement-similarity layer by requiring strong overlap."""
+    statement_tokens = tokenize_for_overlap(statement)
+    if len(statement_tokens) < 2:
+        return {}
+    normalized_statement = normalize_term(statement)
+    filtered: MatchDict = {}
+    for key, entry in matches.items():
+        entry_text = str(entry.get("string", ""))
+        entry_tokens = entry_tokens_for(entry_text)
+        overlap = len(statement_tokens & entry_tokens)
+        if overlap < 2:
+            continue
+        coverage = overlap / max(1, len(statement_tokens))
+        normalized_entry = normalize_term(entry_text)
+        ratio = SequenceMatcher(None, normalized_statement, normalized_entry).ratio()
+        if coverage < 0.5 and ratio < 0.8:
+            continue
+        filtered[key] = entry
+    return filtered
+
+
 def _heuristic_adap_map_match(statement: str) -> Tuple[str, str]:
     """Fallback: choose the best ADAP Map entry using token overlap scoring."""
     tokens = tokenize_for_overlap(statement)
-    normalized_statement = normalize_term(statement)
-    hint_loc = None
-    for phrase in ADAP_MOC_NEGATIVE_HINT_PHRASES:
-        if phrase in normalized_statement:
-            hint_loc = 150
-            break
+    hint_loc = _detect_adap_hint_loc(statement)
 
     best_key = None
     best_score = -1.0
@@ -1744,13 +2132,9 @@ def _heuristic_adap_map_match(statement: str) -> Tuple[str, str]:
 
 def _rank_adap_candidates(statement: str, extra_terms: Iterable[str]) -> List[Tuple[str, float, List[str]]]:
     """Score ADAP entries against all terms to build a candidate list."""
-    tokens = tokenize_for_overlap(" ".join([statement, *extra_terms]))
-    normalized_statement = normalize_term(statement)
-    hint_loc = None
-    for phrase in ADAP_MOC_NEGATIVE_HINT_PHRASES:
-        if phrase in normalized_statement:
-            hint_loc = 150
-            break
+    combined_text = " ".join([statement, *extra_terms])
+    tokens = tokenize_for_overlap(combined_text)
+    hint_loc = _detect_adap_hint_loc(combined_text)
 
     candidates: List[Tuple[str, float, List[str]]] = []
     for key in ADAP_MOC_ORDERED_KEYS:
@@ -1797,10 +2181,11 @@ def _select_best_adap_match(matches: MatchDict) -> Tuple[str | None, str | None,
 
 def evaluate_adap_map_with_gpt(statement: str) -> Tuple[str | None, str | None]:
     """Use GPT to pick the best ADAP Map entry for the statement's intent."""
+    statement_for_prompt = truncate_for_prompt(statement, MAX_STATEMENT_PROMPT_TOKENS)
     prompt = (
         "ADAP Map of Consciousness entries:\n"
         f"{ADAP_MOC_PROMPT_ENTRIES}\n\n"
-        f"Statement: \"{statement}\"\n"
+        f"Statement: \"{statement_for_prompt}\"\n"
         "Select the single best-fitting entry whose intention/crown/3rd eye/heart most closely align with the explicit "
         "or implicit intent of the statement. Capitalization is semantically important (e.g., 'Presence' as a divine "
         "proper noun differs from generic 'presence'); only choose a capitalized divine term if the statement clearly "
@@ -1873,6 +2258,17 @@ def match_adap_map(statement: str, extra_terms: Iterable[str]) -> MatchDict:
         if selected_reason is None:
             selected_reason = "intent match"
 
+    # If we detected a desire/fear/apathy hint, force alignment to the closest LoC when
+    # the chosen entry had no lexical overlap (pure intent guess).
+    hint_loc = _detect_adap_hint_loc(statement)
+    if hint_loc is not None and not selected_fields:
+        current_loc = int(ADAP_MAP_OF_CONSCIOUSNESS[selected_key]["calibration"])
+        if abs(current_loc - hint_loc) > 50:
+            closest_key = _closest_adap_key_to_loc(hint_loc)
+            selected_key = closest_key
+            selected_reason = f"aligned to hinted intent near LoC {hint_loc}"
+            selected_fields = []
+
     entry = dict(ADAP_MAP_OF_CONSCIOUSNESS[selected_key])
     entry["matched_fields"] = selected_fields
     entry["reason"] = selected_reason
@@ -1940,81 +2336,80 @@ def calibration_range(matches: MatchDict) -> Tuple[float, float] | None:
 
 
 def run_pipeline(statement: str, data: Database) -> Tuple[MatchDict, List[Tuple[str, MatchDict]], List[str], List[str], List[str]]:
-    """Execute the full lookup pipeline."""
+    """Execute the lookup pipeline in ordered layers, returning on first hit."""
     stage_records: List[Tuple[str, MatchDict]] = []
     consolidated_matches: MatchDict = {}
     secondary_keywords: List[str] = []
     tertiary_keywords: List[str] = []
-    gpt_suggestions: List[str] = []
     gpt_suggestions_with_reason: List[Tuple[str, str]] = []
 
-    # Step 2 – direct search.
+    # 1. Direct statement
     direct_matches = search_database_exact(statement, data)
     stage_records.append(("Direct statement", direct_matches))
     if direct_matches:
         consolidated_matches.update(direct_matches)
-        return (
-            consolidated_matches,
-            stage_records,
-            secondary_keywords,
-            tertiary_keywords,
-            gpt_suggestions_with_reason,
-        )
+        return consolidated_matches, stage_records, secondary_keywords, tertiary_keywords, gpt_suggestions_with_reason
+
+    # 2. Near exact statement
     near_matches = search_database_near_exact(statement, data)
-    stage_records.append(("Near-exact statement", near_matches))
+    stage_records.append(("Near exact statement", near_matches))
     if near_matches:
         consolidated_matches.update(near_matches)
-        return (
-            consolidated_matches,
-            stage_records,
-            secondary_keywords,
-            tertiary_keywords,
-            gpt_suggestions_with_reason,
-        )
+        return consolidated_matches, stage_records, secondary_keywords, tertiary_keywords, gpt_suggestions_with_reason
 
-    # GPT-assisted suggestions.
+    # 3. Statement similarity
+    statement_similarity_matches, _ = search_database_with_terms(
+        [statement],
+        data,
+        statement_context=statement,
+        min_term_token_overlap_ratio=0.6,
+        min_term_tokens=2,
+    )
+    statement_similarity_matches = _filter_statement_similarity_matches(statement, statement_similarity_matches)
+    stage_records.append(("Statement similarity", statement_similarity_matches))
+    if statement_similarity_matches:
+        consolidated_matches.update(statement_similarity_matches)
+        return consolidated_matches, stage_records, secondary_keywords, tertiary_keywords, gpt_suggestions_with_reason
+
+    # 4. Database suggestions
     gpt_suggestions_with_reason = generate_database_suggestions(statement)
     gpt_suggestions = [name for name, _ in gpt_suggestions_with_reason]
-    if gpt_suggestions:
-        suggestion_matches = search_database_by_names(gpt_suggestions, data, statement)
-    else:
-        suggestion_matches = {}
-    consolidated_matches.update(suggestion_matches)
-    stage_records.append(("Database suggestions", suggestion_matches))
+    suggestion_matches = search_database_by_names(gpt_suggestions, data, statement) if gpt_suggestions else {}
+    stage_matches = dict(suggestion_matches)
+    stage_records.append(("Database suggestions", stage_matches))
+    if stage_matches:
+        consolidated_matches.update(stage_matches)
+        return consolidated_matches, stage_records, secondary_keywords, tertiary_keywords, gpt_suggestions_with_reason
 
-    # Statement similarity using the original statement.
-    statement_similarity_matches, _ = search_database_with_terms([statement], data, statement)
-    consolidated_matches.update(statement_similarity_matches)
-    stage_records.append(("Statement similarity", statement_similarity_matches))
+    # 4b. ADAP Map fallback (only if no database suggestions matched)
+    adap_map_matches = match_adap_map(statement, [statement])
+    stage_records.append(("ADAP map fallback", adap_map_matches))
+    if adap_map_matches:
+        consolidated_matches.update(adap_map_matches)
+        return consolidated_matches, stage_records, secondary_keywords, tertiary_keywords, gpt_suggestions_with_reason
 
-    # Step 3 & 4 – secondary keywords.
+    # 5. Secondary keywords + Map of Consciousness (fallback)
     secondary_keywords = generate_secondary_keywords(statement)
     secondary_matches, matched_secondary_terms = search_database_with_terms(secondary_keywords, data, statement)
-    consolidated_matches.update(secondary_matches)
-    stage_records.append(("Secondary keywords", secondary_matches))
+    stage_matches = dict(secondary_matches)
+    if not stage_matches:
+        stage_matches = match_adap_map(statement, [statement, *secondary_keywords])
+    stage_records.append(("Secondary keywords + ADAP map", stage_matches))
+    if stage_matches:
+        consolidated_matches.update(stage_matches)
+        return consolidated_matches, stage_records, secondary_keywords, tertiary_keywords, gpt_suggestions_with_reason
 
-    # Step 5 & 6 – tertiary keywords (for unmatched secondary terms).
-    unmatched_secondary = [
-        term for term in secondary_keywords if normalize_term(term) not in matched_secondary_terms
-    ]
+    # 6. Tertiary keywords + Map of Consciousness (fallback)
+    unmatched_secondary = [term for term in secondary_keywords if normalize_term(term) not in matched_secondary_terms]
     tertiary_keywords = generate_tertiary_keywords(unmatched_secondary)
     tertiary_matches, _ = search_database_with_terms(tertiary_keywords, data, statement)
-    consolidated_matches.update(tertiary_matches)
-    stage_records.append(("Tertiary keywords", tertiary_matches))
+    stage_matches = dict(tertiary_matches)
+    if not stage_matches:
+        stage_matches = match_adap_map(statement, [statement, *secondary_keywords, *tertiary_keywords])
+    stage_records.append(("Tertiary keywords + ADAP map", stage_matches))
+    consolidated_matches.update(stage_matches)
 
-    # Triangulate using the ADAP Map of Consciousness.
-    map_terms = [statement, *secondary_keywords, *tertiary_keywords]
-    adap_map_matches = match_adap_map(statement, map_terms)
-    consolidated_matches.update(adap_map_matches)
-    stage_records.append(("ADAP Map of Consciousness", adap_map_matches))
-
-    return (
-        consolidated_matches,
-        stage_records,
-        secondary_keywords,
-        tertiary_keywords,
-        gpt_suggestions_with_reason,
-    )
+    return consolidated_matches, stage_records, secondary_keywords, tertiary_keywords, gpt_suggestions_with_reason
 
 
 def format_entry(entry: Dict[str, object]) -> str:
@@ -2088,16 +2483,6 @@ def main() -> None:
         )
 
 
-if __name__ == "__main__":
-    main()
-def language_model_completion(prompt: str, max_new_tokens: int = 64) -> str | None:
-    """Call OpenAI first, then fall back to GPT-2, returning the generated text."""
-    text = generate_with_openai(prompt, max_new_tokens=max_new_tokens)
-    if text:
-        return text
-    return generate_with_gpt2(prompt, max_new_tokens=max_new_tokens)
-
-
 def contexts_align(statement: str, entry_text: str) -> bool:
     """Check whether the statement and entry share compatible context/polarity."""
     key = (normalize_term(statement), entry_text)
@@ -2105,17 +2490,21 @@ def contexts_align(statement: str, entry_text: str) -> bool:
     if cached is not None:
         return cached
 
+    statement_for_prompt = truncate_for_prompt(statement, MAX_CONTEXT_STATEMENT_TOKENS)
+    entry_for_prompt = truncate_for_prompt(entry_text, MAX_CONTEXT_ENTRY_TOKENS)
     prompt = (
         "Determine whether the following statement and entry describe related contexts "
         "with similar intent, polarity, and level (e.g., pro/anti, positive/negative, high/low, "
         "affirmative/denial). Consider negations such as 'not', 'ban', 'resist', etc. Respond ONLY "
         "with a JSON object {\"related\": true/false, \"reason\": \"...\"}. Reply 'true' only if the "
         "statement and entry clearly align; otherwise reply 'false'.\n"
-        f"Statement: {statement}\n"
-        f"Entry: {entry_text}\n"
+        f"Statement: {statement_for_prompt}\n"
+        f"Entry: {entry_for_prompt}\n"
         "JSON:"
     )
-    text = language_model_completion(prompt, max_new_tokens=200)
+    text = None
+    if OPENAI_API_KEY:
+        text = language_model_completion(prompt, max_new_tokens=200)
     related: bool | None = None
     if text:
         text = text.strip()
@@ -2138,15 +2527,11 @@ def contexts_align(statement: str, entry_text: str) -> bool:
         except json.JSONDecodeError:
             related = None
 
+    heuristic_related = _heuristic_context_related(statement, entry_text)
     if related is None:
-        statement_tokens = tokenize_for_overlap(statement)
-        entry_tokens = entry_tokens_for(entry_text)
-        polarity_match = has_negation(statement) == has_negation(entry_text)
-        overlap = len(statement_tokens & entry_tokens)
-        statement_word_count = len(normalize_term(statement).split())
-        entry_word_count = len(normalize_term(entry_text).split())
-        min_overlap = 1 if entry_word_count == 1 or statement_word_count == 1 else 2
-        related = polarity_match and overlap >= min_overlap
+        related = heuristic_related
+    elif related and not heuristic_related:
+        related = False
 
     CONTEXT_ALIGNMENT_CACHE[key] = related
     return related
@@ -2175,10 +2560,11 @@ def heuristic_database_suggestions(statement: str, data: Database, top_n: int = 
 
 def generate_database_suggestions(statement: str) -> List[Tuple[str, str]]:
     """Ask an LLM to suggest database entries similar to the statement, with reasoning."""
+    statement_for_prompt = truncate_for_prompt(statement, MAX_STATEMENT_PROMPT_TOKENS)
     prompt = (
         "You are given the following database entries:\n"
         f"{DATABASE_REFERENCES}\n\n"
-        f"Statement: \"{statement}\"\n"
+        f"Statement: \"{statement_for_prompt}\"\n"
         "Output a JSON array of up to 5 objects. Each object must have keys 'entry', 'reason', "
         "and 'confidence'. The 'entry' must exactly match one of the database entries. The "
         "'reason' should briefly explain the literal overlap between the statement and the entry. "
@@ -2265,3 +2651,7 @@ def generate_database_suggestions(statement: str) -> List[Tuple[str, str]]:
             suggestions.append((name, "heuristic similarity"))
             seen.add(normalized)
     return suggestions
+
+
+if __name__ == "__main__":
+    main()

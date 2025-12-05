@@ -35,6 +35,7 @@ st.markdown(
             background-color: #ffffff;
             color: #000000;
             border: 1px solid #000000;
+            caret-color: #c76a00;
         }
         .stButton button {
             background-color: #ffffff;
@@ -119,13 +120,13 @@ def render_results(
     tertiary_rendered = False
     for stage_name, stage_matches in stages:
         keywords: List[str] = []
-        if stage_name == "Secondary keywords":
+        if stage_name.startswith("Secondary keywords"):
             keywords = secondary_keywords
             secondary_rendered = True
-        elif stage_name == "Tertiary keywords":
+        elif stage_name.startswith("Tertiary keywords"):
             keywords = tertiary_keywords
             tertiary_rendered = True
-        elif stage_name == "Database suggestions":
+        elif stage_name.startswith("Database suggestions"):
             render_suggestion_stage(stage_matches, gpt_suggestions_with_reason)
             continue
         render_stage(stage_name, stage_matches, keywords)
@@ -134,7 +135,7 @@ def render_results(
         render_stage("Secondary keywords", {}, secondary_keywords)
     if not tertiary_rendered and tertiary_keywords:
         render_stage("Tertiary keywords", {}, tertiary_keywords)
-    if gpt_suggestions_with_reason and all(stage_name != "Database suggestions" for stage_name, _ in stages):
+    if gpt_suggestions_with_reason and all(not stage_name.startswith("Database suggestions") for stage_name, _ in stages):
         render_suggestion_stage({}, gpt_suggestions_with_reason)
 
     avg = average_calibration(matches) or geometric_mean_entries(matches)
